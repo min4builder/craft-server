@@ -1,5 +1,3 @@
-extern crate byteorder;
-extern crate mio;
 mod world;
 use byteorder::{ReadBytesExt, NetworkEndian};
 use mio::net::TcpListener;
@@ -99,7 +97,8 @@ fn main() {
                             let mut reader = clients.get_mut(&id).unwrap().write().unwrap();
                             let size = match reader.read_u32::<NetworkEndian>() {
                                 Ok(n) => n as usize,
-                                Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => {
+                                Err(ref e) if e.kind() == ErrorKind::UnexpectedEof
+                                           || e.kind() == ErrorKind::ConnectionReset => {
                                     drop(reader);
                                     server.disconnect(id).unwrap();
                                     clients.remove(&id);

@@ -2,13 +2,14 @@ mod block;
 mod chunk;
 mod coords;
 mod map;
+mod worldgen;
 use byteorder::{WriteBytesExt, NetworkEndian};
 use block::{Block, BlockId};
 use coords::Coords;
 use map::Map;
 use std::collections::HashMap;
 use std::io::{self, Write};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
 struct Player {
     nick: String,
@@ -24,11 +25,12 @@ pub struct Server<T: Write> {
     map: Map,
 }
 
-fn add_msg(v: &mut Vec<u8>, s: &str) {
-    let b = s.as_bytes();
-    v.reserve(4 + b.len());
-    v.write_u32::<NetworkEndian>(b.len() as u32).unwrap();
-    v.extend_from_slice(b);
+fn write_raw_msg<T: Write>(w: &mut T, b: &[u8]) -> Result<(), io::Error> {
+    w.write_u32::<NetworkEndian>(b.len() as u32)?;
+    w.write_all(b)
+}
+fn write_msg<T: Write>(w: &mut T, s: &str) -> Result<(), io::Error> {
+    write_raw_msg(w, s.as_bytes())
 }
 
 impl<T: Write> Server<T> {
@@ -38,19 +40,17 @@ impl<T: Write> Server<T> {
             map: Map::new(),
         }
     }
-    fn send_except(&mut self, ex: usize, msg: &[u8]) -> Result<(), io::Error> {
+    fn send_except<F: Fn(&mut T) -> Result<(), io::Error>>(&mut self, ex: usize, write: F) -> Result<(), io::Error> {
         for (id, (_, w)) in self.players.iter_mut() {
             if *id != ex {
                 let mut writer = w.write().unwrap();
-                writer.write_all(msg)?;
+                write(&mut writer)?;
             }
         }
         Ok(())
     }
-    fn send(&mut self, ex: usize, msg: &[u8]) -> Result<(), io::Error> {
-        let mut writer = self.players.get_mut(&ex).unwrap().1.write().unwrap();
-        writer.write_all(msg)?;
-        Ok(())
+    fn client_writer(&mut self, ex: usize) -> RwLockWriteGuard<T> {
+        self.players.get_mut(&ex).unwrap().1.write().unwrap()
     }
     pub fn connect(&mut self, client: Arc<RwLock<T>>, id: usize) -> Result<(), io::Error> {
         let player = Player {
@@ -59,29 +59,29 @@ impl<T: Write> Server<T> {
             rx: 0.0, ry: 0.0,
         };
         let mut msgs = Vec::new();
-        add_msg(&mut msgs, &format!("N,{},{}", id, player.nick));
-        add_msg(&mut msgs, &format!("T,{} has joined", player.nick));
-        add_msg(&mut msgs, &format!("P,{},0.0,0.0,0.0,0.0,0.0", id));
+        write_msg(&mut msgs, &format!("N,{},{}", id, player.nick))?;
+        write_msg(&mut msgs, &format!("T,{} has joined", player.nick))?;
+        write_msg(&mut msgs, &format!("P,{},0.0,0.0,0.0,0.0,0.0", id))?;
         self.players.insert(id, (player, client));
-        self.send_except(id, &msgs)?;
+        self.send_except(id, |w| w.write_all(&msgs))?;
         msgs.clear();
-        add_msg(&mut msgs, &format!("U,{},0.0,0.0,0.0,0.0,0.0", id));
-        add_msg(&mut msgs, &format!("E,{},600", self.map.get_time() / 20));
+        write_msg(&mut msgs, &format!("U,{},0.0,0.0,0.0,0.0,0.0", id))?;
+        write_msg(&mut msgs, &format!("E,{},600", self.map.get_time() / 20))?;
         for (i, (p, _)) in self.players.iter() {
             if *i != id {
-                add_msg(&mut msgs, &format!("P,{},{},{},{},{},{}", i, p.x, p.y, p.z, p.rx, p.ry));
-                add_msg(&mut msgs, &format!("N,{},{}", *i, p.nick));
+                write_msg(&mut msgs, &format!("P,{},{},{},{},{},{}", i, p.x, p.y, p.z, p.rx, p.ry))?;
+                write_msg(&mut msgs, &format!("N,{},{}", *i, p.nick))?;
             }
         }
-        self.send(id, &msgs)
+        self.client_writer(id).write_all(&msgs)
     }
     pub fn disconnect(&mut self, id: usize) -> Result<(), io::Error> {
         let mut msgs = Vec::new();
-        add_msg(&mut msgs, &format!("D,{}", id));
-        add_msg(&mut msgs, &format!("T,{} has left", self.players[&id].0.nick));
+        write_msg(&mut msgs, &format!("D,{}", id))?;
+        write_msg(&mut msgs, &format!("T,{} has left", self.players[&id].0.nick))?;
         self.players.remove(&id);
         self.map.save();
-        self.send_except(id, &msgs)
+        self.send_except(id, |w| w.write_all(&msgs))
     }
     pub fn tick(&mut self, secs: f32) {
         self.map.tick((secs * 20.0).round() as usize);
@@ -91,21 +91,18 @@ impl<T: Write> Server<T> {
         match (fields[0], fields.len()) {
             ("/nick", 2) => {
                 let mut msgs = Vec::new();
-                add_msg(&mut msgs, &format!("T,{} is now {}", &self.players[&id].0.nick, fields[1]));
-                add_msg(&mut msgs, &format!("N,{},{}", id, fields[1]));
+                write_msg(&mut msgs, &format!("T,{} is now {}", &self.players[&id].0.nick, fields[1]))?;
+                write_msg(&mut msgs, &format!("N,{},{}", id, fields[1]))?;
                 self.players.get_mut(&id).unwrap().0.nick = fields[1].to_string();
-                self.send_except(id, &msgs)?;
-                self.send(id, &msgs)
+                self.send_except(id, |w| w.write_all(&msgs))?;
+                self.client_writer(id).write_all(&msgs)
             }
             ("/nick", 1) => {
-                let mut msg = Vec::new();
-                add_msg(&mut msg, &format!("T,You are {}", &self.players[&id].0.nick));
-                self.send(id, &msg)
+                let msg = format!("T,You are {}", &self.players[&id].0.nick);
+                write_msg::<T>(&mut self.client_writer(id), &msg)
             }
             (cmd, args) => {
-                let mut msg = Vec::new();
-                add_msg(&mut msg, &format!("T,Unknown command: {}[{}]", cmd, args-1));
-                self.send(id, &msg)
+                write_msg::<T>(&mut self.client_writer(id), &format!("T,Unknown command: {}[{}]", cmd, args-1))
             }
         }
     }
@@ -124,19 +121,22 @@ impl<T: Write> Server<T> {
             "C" => {
                 let p: i64 = fields[1].parse().unwrap();
                 let q: i64 = fields[2].parse().unwrap();
+                let r: i64 = fields[3].parse().unwrap();
                 let _key: i64 = fields[3].parse().unwrap();
                 println!("{}: {}", id, smsg);
-                
-                match self.map.get_chunk((p, q)) {
-                    None => Ok(()),
-                    Some(chunk) => {
-                        let mut msgs = Vec::new();
-                        for (c, b) in chunk.iter() {
-                            add_msg(&mut msgs, &format!("B,{},{},{},{},{},{}\n", p, q, p * 32 + c.0, c.1, q * 32 + c.2, b.matter as u8));
-                        }
-                        self.send(id, &msgs)
-                    }
+                let chunk = self.map.get_chunk(Coords(p, q, r));
+                if chunk.is_air() {
+                    println!("Chunk empty");
+                    return Ok(());
                 }
+                println!("Sending chunk");
+                let mut blocks = Vec::with_capacity(1+8+8 + 32*32*32);
+                blocks.write_u8('C' as u8).unwrap();
+                blocks.write_i64::<NetworkEndian>(p).unwrap();
+                blocks.write_i64::<NetworkEndian>(q).unwrap();
+                blocks.write_i64::<NetworkEndian>(r).unwrap();
+                chunk.write_to(&mut blocks).unwrap();
+                write_raw_msg::<T>(&mut self.client_writer(id), &blocks)
             }
             "P" => {
                 let (player, _) = self.players.get_mut(&id).unwrap();
@@ -146,8 +146,8 @@ impl<T: Write> Server<T> {
                 player.rx = fields[4].parse().unwrap();
                 player.ry = fields[5].parse().unwrap();
                 let mut msg = Vec::new();
-                add_msg(&mut msg, &format!("P,{},{},{},{},{},{}\n", id, player.x, player.y, player.z, player.rx, player.ry));
-                self.send_except(id, &msg)
+                write_msg(&mut msg, &format!("P,{},{},{},{},{},{}\n", id, player.x, player.y, player.z, player.rx, player.ry))?;
+                self.send_except(id, |w| w.write_all(&msg))
             }
             "B" => {
                 let x: i64 = fields[1].parse().unwrap();
@@ -158,13 +158,12 @@ impl<T: Write> Server<T> {
                 println!("{}: {}", id, smsg);
                 self.map.replace_block(c, Block::new(w as BlockId));
                 println!("{:?} of chunk {:?} is now {}", (x, y, z), Coords(x, y, z).chunk(), self.map.get_block(c).matter as u8);
-                let (p, q) = c.chunk();
-                let smsg = format!("B,{},{},{},{},{},{}\n", p, q, x, y, z, w);
+                let smsg = format!("B,{},{},{},{}\n", x, y, z, w);
                 println!("{}", &smsg);
                 let mut msg = Vec::new();
-                add_msg(&mut msg, &smsg);
-                self.send_except(id, &msg)?;
-                self.send(id, &msg)
+                write_msg(&mut msg, &smsg)?;
+                self.send_except(id, |w| w.write_all(&msg))?;
+                self.client_writer(id).write_all(&msg)
             }
             "T" => {
                 let (_, chat) = smsg.split_at(2);
@@ -173,9 +172,9 @@ impl<T: Write> Server<T> {
                 } else {
                     let mut msg = Vec::new();
                     println!("Chat: [{}] {}", self.players[&id].0.nick, chat);
-                    add_msg(&mut msg, &format!("T,[{}] {}", self.players[&id].0.nick, chat));
-                    self.send_except(id, &msg)?;
-                    self.send(id, &msg)
+                    write_msg(&mut msg, &format!("T,[{}] {}", self.players[&id].0.nick, chat))?;
+                    self.send_except(id, |w| w.write_all(&msg))?;
+                    self.client_writer(id).write_all(&msg)
                 }
             }
             m => panic!("{} message not implemented", m),

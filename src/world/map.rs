@@ -4,24 +4,10 @@ use super::chunk::Chunk;
 use super::coords::Coords;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, Read};
-
-pub enum Callback {
-    BlockChanged(Box<FnMut(Coords, Block)>),
-}
-
-impl Callback {
-    pub fn on_block_change(&mut self, c: Coords, b: Block) {
-        match self {
-            Callback::BlockChanged(f) => f(c, b),
-            _ => {}
-        }
-    }
-}
+use std::io::{BufReader, Read};
 
 pub struct Map {
-    callbacks: Vec<Callback>,
-    chunks: HashMap<(i64, i64), Option<Chunk>>,
+    chunks: HashMap<Coords, Chunk>,
     daytime: usize,
 }
 
@@ -34,48 +20,33 @@ impl Map {
             }
         };
         Map {
-            callbacks: Vec::new(),
             chunks: HashMap::new(),
             daytime: time as usize,
         }
     }
-    pub fn add_callback(&mut self, c: Callback) {
-        self.callbacks.push(c);
-    }
-    pub fn get_mut_chunk(&mut self, cc: (i64, i64)) -> &mut Option<Chunk> {
+    pub fn get_mut_chunk(&mut self, cc: Coords) -> &mut Chunk {
         self.chunks.entry(cc).or_insert_with(|| {
-            let (p, q) = cc;
-            match File::open(format!("chunk.{}.{}.cf", p, q)) {
-                Err(_) => None,
+            let Coords(p, q, r) = cc;
+            match File::open(format!("chunk.{}.{}.{}.cf", p, q, r)) {
+                Err(_) => Chunk::empty(cc),
                 Ok(f) => {
-                    println!("Trying file chunk.{}.{}.cf", p, q);
+                    println!("Trying file chunk.{}.{}.{}.cf", p, q, r);
                     println!("Loading chunk {:?}", cc);
-                    Some(f.bytes().collect::<io::Result<Chunk>>().unwrap())
+                    Chunk::load(cc, BufReader::new(f))
                 }
             }
         })
     }
-    pub fn get_chunk(&mut self, cc: (i64, i64)) -> &Option<Chunk> {
+    pub fn get_chunk(&mut self, cc: Coords) -> &Chunk {
         self.get_mut_chunk(cc)
     }
     pub fn replace_block(&mut self, c: Coords, block: Block) {
         let chunk = self.get_mut_chunk(c.chunk());
-        match chunk {
-            None => {
-                chunk.replace(Chunk::empty());
-            }
-            Some(_) => {}
-        }
-        chunk.as_mut().unwrap().replace_block(c.in_chunk(), block);
-        for cb in self.callbacks.iter_mut() {
-            cb.on_block_change(c, block);
-        }
+        chunk.replace_block(c.in_chunk(), block);
     }
     pub fn get_block(&mut self, c: Coords) -> Block {
-        match self.get_chunk(c.chunk()) {
-            None => Block::new(Block::UNCHANGED),
-            Some(chunk) => chunk.get_block(c.in_chunk()),
-        }
+        let chunk = self.get_chunk(c.chunk());
+        chunk.get_block(c.in_chunk())
     }
     pub fn get_time(&self) -> usize {
         self.daytime
@@ -85,17 +56,12 @@ impl Map {
         println!("daytime = {}", self.daytime);
     }
     pub fn save(&mut self) {
-        for ((p, q), chunk) in &self.chunks {
-            match chunk {
-                None => {}
-                Some(chunk) => {
-                    if !chunk.is_unchanged() {
-                        println!("Creating file chunk.{}.{}.cf", p, q);
-                        let mut cf = File::create(format!("chunk.{}.{}.cf", p, q)).unwrap();
-                        println!("Writing chunk ({}, {})", p, q);
-                        chunk.write_to(&mut cf).unwrap();
-                    }
-                }
+        for (Coords(p, q, r), chunk) in &self.chunks {
+            if !chunk.is_unchanged() {
+                println!("Creating file chunk.{}.{}.{}.cf", p, q, r);
+                let mut cf = File::create(format!("chunk.{}.{}.{}.cf", p, q, r)).unwrap();
+                println!("Writing chunk ({}, {}, {})", p, q, r);
+                chunk.write_to(&mut cf).unwrap();
             }
         }
         {
