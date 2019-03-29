@@ -85,6 +85,9 @@ impl<T: Write> Server<T> {
     }
     pub fn tick(&mut self, secs: f32) {
         self.map.tick((secs * 20.0).round() as usize);
+        if secs > 30.0 {
+            self.map.save();
+        }
     }
     pub fn command(&mut self, id: usize, cmd: &str) -> Result<(), io::Error> {
         let fields: Vec<&str> = cmd.split_whitespace().collect();

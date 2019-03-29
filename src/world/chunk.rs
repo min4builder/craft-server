@@ -1,12 +1,11 @@
 use super::block::{Block, BlockId};
 use super::coords::Coords;
-use super::worldgen;
+use super::worldgen::Worldgen;
 use flate2::write::DeflateEncoder;
 use flate2::bufread::DeflateDecoder;
 use flate2::Compression;
 use std::io::{BufRead, Read, Write};
 use std::io;
-use std::cell::RefCell;
 
 fn chunk_coords(b: usize) -> Coords {
     Coords(
@@ -18,7 +17,6 @@ fn chunk_coords(b: usize) -> Coords {
 
 pub struct Chunk {
     blocks: [Block; 32*32*32],
-    cached: RefCell<Option<Vec<u8>>>,
     unchanged: bool,
     air: bool,
 }
@@ -41,25 +39,23 @@ impl<'a> Iterator for Iter<'a> {
 }
 
 impl Chunk {
-    pub fn empty(c: Coords) -> Chunk {
+    pub fn new(worldgen: &Worldgen, c: Coords) -> Chunk {
         let first_block = Coords(c.0 * 32, c.1 * 32, c.2 * 32);
-        let blocks = worldgen::whole_chunk(first_block);
-        let air = blocks.iter().try_fold(true, |_, &b|
-          if b.matter != Block::AIR { None } else { Some(true) }).is_some();
+        let blocks = worldgen.whole_chunk(first_block);
+        let air = worldgen.air_chunk(first_block);
         Chunk {
             blocks: blocks,
-            cached: RefCell::new(None),
             unchanged: true,
             air: air,
         }
     }
     pub fn load<T: BufRead>(_c: Coords, r: T) -> Chunk {
-        let mut blocks = [Block::new(Block::UNCHANGED); 32*32*32];
+        let mut blocks = [Block::AIR; 32*32*32];
         let mut i = 0;
         let mut air = true;
         for id in DeflateDecoder::new(r).bytes().map(|b| b.unwrap()) {
             let b = Block::new(id as BlockId);
-            if b.matter != Block::AIR {
+            if b.matter != Block::AIR.matter {
                 air = false;
             }
             if i >= 32*32*32 {
@@ -70,7 +66,6 @@ impl Chunk {
         }
         Chunk {
             blocks: blocks,
-            cached: RefCell::new(None),
             air: air,
             unchanged: true,
         }
@@ -83,15 +78,14 @@ impl Chunk {
         assert!(Coords(0, 0, 0) <= c);
         assert!(c < Coords(32, 32, 32));
         self.unchanged = false;
-        if block.matter != Block::AIR {
+        if block.matter != Block::AIR.matter {
             self.air = false;
         }
-        self.cached.replace(None);
-        self.blocks[c.0 as usize + c.2 as usize * 32 + c.1 as usize * 32 * 32] = block;
+        self.blocks[c.0 as usize + c.1 as usize * 32 + c.2 as usize * 32 * 32] = block;
     }
     pub fn get_block(&self, c: Coords) -> Block {
         assert!(Coords(0, 0, 0) <= c && c < Coords(32, 32, 32));
-        self.blocks[c.0 as usize + c.2 as usize * 32 + c.1 as usize * 32 * 32]
+        self.blocks[c.0 as usize + c.1 as usize * 32 + c.2 as usize * 32 * 32]
     }
     pub fn is_unchanged(&self) -> bool {
         self.unchanged
@@ -100,14 +94,11 @@ impl Chunk {
         self.air
     }
     pub fn write_to<T: Write>(&self, w: &mut T) -> io::Result<()> {
-        if self.cached.borrow().is_none() {
-            let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
-            for b in self.blocks.iter().map(|b| b.matter as u8) {
-                encoder.write(&[b])?;
-            }
-            self.cached.replace(Some(encoder.finish().unwrap()));
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        for b in self.blocks.iter().map(|b| b.matter as u8) {
+            encoder.write(&[b])?;
         }
-        w.write_all(&self.cached.borrow().as_ref().unwrap())
+        w.write_all(&encoder.finish().unwrap())
     }
 }
 

@@ -6,8 +6,10 @@ pub struct Block {
 }
 
 impl Block {
-    pub const UNCHANGED: BlockId = !0 as BlockId;
-    pub const AIR: BlockId = 0 as BlockId;
+    pub const AIR: Block = Block { matter: 0 as BlockId };
+    pub const DARK_STONE: Block = Block { matter: 1 as BlockId };
+    pub const WATER: Block = Block { matter: 2 as BlockId };
+    pub const LIGHT_STONE: Block = Block { matter: 3 as BlockId };
     pub fn new(id: BlockId) -> Block {
         Block { matter: id }
     }

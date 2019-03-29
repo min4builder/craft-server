@@ -2,13 +2,15 @@ use byteorder::{ReadBytesExt, WriteBytesExt, NetworkEndian};
 use super::block::Block;
 use super::chunk::Chunk;
 use super::coords::Coords;
+use super::worldgen::Worldgen;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::BufReader;
 
 pub struct Map {
     chunks: HashMap<Coords, Chunk>,
     daytime: usize,
+    worldgen: Worldgen,
 }
 
 impl Map {
@@ -22,13 +24,15 @@ impl Map {
         Map {
             chunks: HashMap::new(),
             daytime: time as usize,
+            worldgen: Worldgen::new(0),
         }
     }
     pub fn get_mut_chunk(&mut self, cc: Coords) -> &mut Chunk {
+        let worldgen = &self.worldgen;
         self.chunks.entry(cc).or_insert_with(|| {
             let Coords(p, q, r) = cc;
             match File::open(format!("chunk.{}.{}.{}.cf", p, q, r)) {
-                Err(_) => Chunk::empty(cc),
+                Err(_) => Chunk::new(worldgen, cc),
                 Ok(f) => {
                     println!("Trying file chunk.{}.{}.{}.cf", p, q, r);
                     println!("Loading chunk {:?}", cc);
@@ -56,14 +60,18 @@ impl Map {
         println!("daytime = {}", self.daytime);
     }
     pub fn save(&mut self) {
-        for (Coords(p, q, r), chunk) in &self.chunks {
+        self.chunks.retain(|cc, chunk| {
+            let Coords(p, q, r) = cc;
             if !chunk.is_unchanged() {
                 println!("Creating file chunk.{}.{}.{}.cf", p, q, r);
                 let mut cf = File::create(format!("chunk.{}.{}.{}.cf", p, q, r)).unwrap();
                 println!("Writing chunk ({}, {}, {})", p, q, r);
                 chunk.write_to(&mut cf).unwrap();
+                true
+            } else {
+                false
             }
-        }
+        });
         {
             let mut lf = File::create("level.lf").unwrap();
             println!("Writing time");
